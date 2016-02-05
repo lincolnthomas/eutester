@@ -14,6 +14,7 @@ import static com.eucalyptus.tests.awssdk.Eutester4j.s3;
 
 import static org.testng.AssertJUnit.assertTrue;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -149,20 +150,18 @@ public class S3CorsTests {
   public void testCors() throws Exception {
     testInfo(this.getClass().getSimpleName() + " - testCors");
 
-    boolean error;
-
-    error = false;
     try {
-      print(account + ": Fetching bucket CORS config for " + bucketName);
-      s3.getBucketCrossOriginConfiguration(bucketName);
+      print(account + ": Fetching empty bucket CORS config for " + bucketName);
+      BucketCrossOriginConfiguration corsConfig = s3.getBucketCrossOriginConfiguration(bucketName);
+      assertTrue("Expected to receive no CORS config (haven't created one yet), but did! " + 
+          "Returned corsConfig " + 
+          (corsConfig == null ? "is null" : "has " + corsConfig.getRules().size() + " rules."), 
+          corsConfig == null || corsConfig.getRules().size() == 0);
     } catch (AmazonServiceException ase) {
-      verifyException(ase);
-      error = true;
-    } finally {
-      assertTrue("Expected to receive a 501 NotImplemented error but did not", error);
+      printException(ase);
+      assertTrue("Caught AmazonServiceException trying to get the empty bucket CORS config: " + ase.getMessage(), false);
     }
 
-    error = false;
     try {
       print(account + ": Setting bucket CORS config for " + bucketName);
       /**
@@ -195,18 +194,79 @@ public class S3CorsTests {
           "x-amz-server-side-encryption",
           "x-amz-request-id",
           "x-amz-id-2");
-      corsRuleList.add(corsRuleExtended);      
+      corsRuleList.add(corsRuleExtended);
 
       BucketCrossOriginConfiguration corsConfig = new BucketCrossOriginConfiguration(corsRuleList);
       s3.setBucketCrossOriginConfiguration(bucketName, corsConfig);
+      
+      assertTrue("Expected to have a CORS config of 3 rules. Actual corsConfig " + 
+          (corsConfig == null ? "is null" : "has " + corsConfig.getRules().size() + " rules."), 
+          corsConfig != null && corsConfig.getRules().size() == 3);
+
+      // Just check the last (3rd) rule's fields
+      CORSRule corsRuleExtendedFromConfig = corsConfig.getRules().get(2);
+
+      List<String> originsFromConfig = corsRuleExtendedFromConfig.getAllowedOrigins();
+      assertTrue("Allowed Origin we have is unexpected: " + originsFromConfig, 
+          originsFromConfig != null && originsFromConfig.size() == 1 &&
+              originsFromConfig.get(0).equals("*"));
+
     } catch (AmazonServiceException ase) {
-      verifyException(ase);
-      error = true;
-    } finally {
-      assertTrue("Expected to receive a 501 NotImplemented error but did not", error);
+      printException(ase);
+      assertTrue("Caught AmazonServiceException trying to set the bucket CORS config: " + ase.getMessage(), false);
     }
 
-    error = false;
+    try {
+      //LPT: Is there an async delay between when setting a CORS config returns to the
+      // caller, and when it's available for a Get? Delay to test that.
+      Thread.sleep(10000);
+      
+      print(account + ": Fetching populated bucket CORS config for " + bucketName);
+      BucketCrossOriginConfiguration corsConfig = s3.getBucketCrossOriginConfiguration(bucketName);
+      assertTrue("Expected to receive a CORS config of 3 rules. Returned corsConfig " + 
+          (corsConfig == null ? "is null" : "has " + corsConfig.getRules().size() + " rules."), 
+          corsConfig != null && corsConfig.getRules().size() == 3);
+
+      // Just check the last (3rd) rule's fields
+      CORSRule corsRuleExtended = corsConfig.getRules().get(2);
+
+      List<String> originsReceived = corsRuleExtended.getAllowedOrigins();
+      assertTrue("Allowed Origin is unexpected: " + originsReceived, 
+          originsReceived != null && originsReceived.size() == 1 &&
+          originsReceived.get(0).equals("*"));
+
+      List<CORSRule.AllowedMethods> methodsReceived = corsRuleExtended.getAllowedMethods();
+      assertTrue("Allowed Methods is unexpected: " + methodsReceived, 
+          methodsReceived != null && methodsReceived.size() == 1 &&
+          methodsReceived.get(0).equals(CORSRule.AllowedMethods.GET));
+
+      List<String> allowedHeadersReceived = corsRuleExtended.getAllowedHeaders();
+      assertTrue("Allowed Headers is unexpected: " + allowedHeadersReceived, 
+          allowedHeadersReceived != null && allowedHeadersReceived.size() == 1 &&
+          allowedHeadersReceived.get(0).equals("*"));
+
+      String idReceived = corsRuleExtended.getId();
+      assertTrue("Rule ID is unexpected: " + idReceived,
+          idReceived.equals("ManuallyAssignedId1"));
+
+      int maxAgeReceived = corsRuleExtended.getMaxAgeSeconds();
+      assertTrue("Max Age in Seconds is unexpected: " + maxAgeReceived,
+          maxAgeReceived == 3000);
+
+      ArrayList<String> exposedHeadersExpected = new ArrayList<String>(3);
+      exposedHeadersExpected.add("x-amz-server-side-encryption");
+      exposedHeadersExpected.add("x-amz-request-id");
+      exposedHeadersExpected.add("x-amz-id-2");
+      List<String> exposedHeadersReceived = corsRuleExtended.getExposedHeaders();
+      assertTrue("Exposed Headers is unexpected: " + exposedHeadersReceived, 
+          exposedHeadersReceived != null && 
+          exposedHeadersReceived.size() == exposedHeadersExpected.size() &&
+          exposedHeadersReceived.containsAll(exposedHeadersExpected));
+    } catch (AmazonServiceException ase) {
+      printException(ase);
+      assertTrue("Caught AmazonServiceException trying to get the bucket CORS config: " + ase.getMessage(), false);
+    }
+
     try {
       print(account + ": Preflight request for bucket CORS config for " + bucketName);
       //LPT: Create sending various preflight OPTIONS requests,
@@ -225,21 +285,29 @@ public class S3CorsTests {
       throw aseForced;
 
     } catch (AmazonServiceException ase) {
-      verifyException(ase);
-      error = true;
-    } finally {
-      assertTrue("Expected to receive a 501 NotImplemented error but did not", error);
+      printException(ase);
+      assertTrue("Expected response status 501 NotImplemented, instead got: " + ase.getStatusCode(), ase.getStatusCode() == 501);
     }
 
-    error = false;
     try {
       print(account + ": Deleting bucket CORS config for " + bucketName);
       s3.deleteBucketCrossOriginConfiguration(bucketName);
     } catch (AmazonServiceException ase) {
-      verifyException(ase);
-      error = true;
+      printException(ase);
     } finally {
-      assertTrue("Expected to receive a 501 NotImplemented error but did not", error);
+      assertTrue("Expected to receive a 501 NotImplemented error but did not", false);
+    }
+
+    try {
+      print(account + ": Fetching empty bucket CORS config after deletion, for " + bucketName);
+      BucketCrossOriginConfiguration corsConfig = s3.getBucketCrossOriginConfiguration(bucketName);
+      assertTrue("Expected to receive no CORS config (deleted it), but did! " + 
+          "Returned corsConfig " + 
+          (corsConfig == null ? "is null" : "has " + corsConfig.getRules().size() + " rules."), 
+          corsConfig == null || corsConfig.getRules().size() == 0);
+    } catch (AmazonServiceException ase) {
+      printException(ase);
+      assertTrue("Caught AmazonServiceException trying to get the empty (deleted) bucket CORS config: " + ase.getMessage(), false);
     }
 
   }
@@ -249,17 +317,8 @@ public class S3CorsTests {
     print("Caught Exception: " + ase.getMessage());
     print("HTTP Status Code: " + ase.getStatusCode());
     print("Amazon Error Code: " + ase.getErrorCode());
+    print("Amazon Error Message: " + ase.getErrorMessage());
     print("Request ID: " + ase.getRequestId());
   }
 
-  private void verifyException(AmazonServiceException ase) {
-    print("Caught Exception: " + ase.getMessage());
-    print("HTTP Status Code: " + ase.getStatusCode());
-    print("Amazon Error Code: " + ase.getErrorCode());
-    print("Request ID: " + ase.getRequestId());
-    assertTrue("Expected HTTP status code to be 501 but got " + ase.getStatusCode(), ase.getStatusCode() == 501);
-    assertTrue("Expected AWS error code to be NotImplemented bug got " + ase.getErrorCode(), ase.getErrorCode().equals("NotImplemented"));
-    assertTrue("Invalid or blank message", ase.getMessage() != null || !ase.getMessage().isEmpty());
-    assertTrue("Invalid or blank request ID", ase.getRequestId() != null || !ase.getRequestId().isEmpty());
-  }
 }
